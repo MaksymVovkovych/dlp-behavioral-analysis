@@ -4,6 +4,35 @@ import plotly.express as px
 import os
 import re
 from datetime import datetime
+import socket
+
+def scan_local_databases():
+    common_ports = {
+        5432: "PostgreSQL",
+        3306: "MySQL/MariaDB",
+        1433: "MS SQL Server",
+        27017: "MongoDB"
+    }
+    found_dbs = []
+    
+    st.sidebar.write("🔍 Сканування портів...")
+    for port, name in common_ports.items():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            result = s.connect_ex(('127.0.0.1', port))
+            if result == 0:
+                found_dbs.append({"Тип": name, "Порт": port, "Статус": "В мережі"})
+    return found_dbs
+
+
+# У sidebar додаємо кнопку сканування
+if st.sidebar.button("🔎 Знайти активні БД"):
+    databases = scan_local_databases()
+    if databases:
+        st.sidebar.success(f"Знайдено БД: {len(databases)}")
+        st.sidebar.table(databases)
+    else:
+        st.sidebar.warning("Активних БД не знайдено")
 
 # Налаштування сторінки
 st.set_page_config(page_title="SentinelDB | Behavioral DLP", layout="wide")
@@ -56,5 +85,39 @@ if st.sidebar.button("Оновити дані"):
         st.dataframe(df.sort_values(by='Time', ascending=False), use_container_width=True)
     else:
         st.error("Файл логів пустий або не знайдений. Запустіть базу та зробіть запити.")
+        # Після відображення таблиці в Streamlit
+    st.subheader("📊 Експорт результатів")
+    csv = df.to_csv(index=False).encode('utf-8')
+
+    st.download_button(
+        label="📥 Завантажити повний звіт (CSV)",
+        data=csv,
+        file_name=f"sentinel_report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime='text/csv',
+    )
 else:
     st.info("Натисніть 'Оновити дані' для початку аналізу активності БД.")
+
+
+from sklearn.ensemble import IsolationForest
+
+def calculate_ml_threat(df):
+    if len(df) < 5:  # Мало даних для навчання
+        return df, 0
+    
+    # Готуємо ознаки (features)
+    df['hour'] = df['Time'].dt.hour
+    df['query_len'] = df['Query'].str.len()
+    df['is_select'] = df['Query'].str.upper().str.contains('SELECT').astype(int)
+    
+    # Навчаємо модель "на льоту"
+    model = IsolationForest(contamination=0.1, random_state=42)
+    df['anomaly_score'] = model.fit_predict(df[['hour', 'query_len', 'is_select']])
+    
+    # Рахуємо % аномалій
+    threat_level = int((df['anomaly_score'] == -1).mean() * 100)
+    return df, threat_level
+
+
+
+
