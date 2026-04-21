@@ -1,123 +1,86 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-import os
-import re
+import engine # Імпортуємо нашу логіку
 from datetime import datetime
-import socket
+import plotly.express as px
+import plotly.graph_objects as go
 
-def scan_local_databases():
-    common_ports = {
-        5432: "PostgreSQL",
-        3306: "MySQL/MariaDB",
-        1433: "MS SQL Server",
-        27017: "MongoDB"
-    }
-    found_dbs = []
-    
-    st.sidebar.write("🔍 Сканування портів...")
-    for port, name in common_ports.items():
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.5)
-            result = s.connect_ex(('127.0.0.1', port))
-            if result == 0:
-                found_dbs.append({"Тип": name, "Порт": port, "Статус": "В мережі"})
-    return found_dbs
+st.set_page_config(page_title="SentinelDB | Hybrid Audit", layout="wide")
+st.title("🛡️ SentinelDB: Behavioral DLP System")
 
-
-# У sidebar додаємо кнопку сканування
-if st.sidebar.button("🔎 Знайти активні БД"):
-    databases = scan_local_databases()
-    if databases:
-        st.sidebar.success(f"Знайдено БД: {len(databases)}")
-        st.sidebar.table(databases)
+# --- СІДЕБАР (Discovery) ---
+st.sidebar.header("🔍 Система виявлення")
+if st.sidebar.button("Сканувати локальні БД"):
+    dbs = engine.scan_local_databases()
+    if dbs:
+        st.sidebar.success(f"Знайдено: {len(dbs)}")
+        st.sidebar.table(dbs)
     else:
-        st.sidebar.warning("Активних БД не знайдено")
+        st.sidebar.warning("БД не знайдено")
 
-# Налаштування сторінки
-st.set_page_config(page_title="SentinelDB | Behavioral DLP", layout="wide")
+# --- ГОЛОВНІ ВКЛАДКИ ---
+tab_logs, tab_sys, tab_live = st.tabs([
+    "📄 Аналіз логів (Forensic)", 
+    "🔑 Системний аудит (Privileged)", 
+    "📡 Live Трафік (Network)"
+])
 
-st.title("🛡️ SentinelDB: Behavioral DLP Analyzer")
-st.sidebar.header("Налаштування моніторингу")
+# --- ВКЛАДКА 1: ЛОГИ ---
+with tab_logs:
+    if st.button("🚀 Run Deep ML Analysis"):
+        df = engine.load_logs()
+        df, threat_level = engine.analyze_data(df)
 
-# Шлях до логів
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.normpath(os.path.join(BASE_DIR, "..", "db", "logs", "postgresql.log"))
+        if not df.empty:
+            # Створюємо колонки для статистики
+            col_metrics, col_chart = st.columns([1, 1])
 
-def load_data():
-    data = []
-    pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?(?:statement|execute.*?): (.*)'
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                match = re.search(pattern, line)
-                if match:
-                    data.append({
-                        'Time': pd.to_datetime(match.group(1)),
-                        'Query': match.group(2).strip()
-                    })
-    return pd.DataFrame(data)
+            with col_metrics:
+                st.metric("Global Threat Level", f"{threat_level}%", delta=f"{threat_level}% risk", delta_color="inverse")
+                st.write(f"📊 Всього оброблено запитів: **{len(df)}**")
+                st.write(f"🚨 Виявлено аномалій: **{len(df[df['Status'] == '⚠️ ATTACK'])}**")
 
-# Головний екран
-if st.sidebar.button("Оновити дані"):
-    df = load_data()
-    
-    if not df.empty:
-        # Аналіз аномалій (проста логіка для тесту)
-        df['Diff'] = df['Time'].diff().dt.total_seconds()
-        df['Status'] = df['Diff'].apply(lambda x: "⚠️ ATTACK" if x < 1.0 else "✅ OK")
-        
-        # Метрики
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Всього запитів", len(df))
-        col2.metric("Виявлено аномалій", len(df[df['Status'] == "⚠️ ATTACK"]))
-        col3.metric("Захищено таблиць", 1) # Поки що одна users_private
+            with col_chart:
+                # МАЛЮЄМО КРУЖОЧОК (Pie Chart)
+                fig = px.pie(df, names='Status', title='Розподіл безпеки запитів',
+                             color='Status', color_discrete_map={'✅ OK':'#2ecc71', '⚠️ ATTACK':'#e74c3c'},
+                             hole=0.4) # Робимо його "бубликом"
+                st.plotly_chart(fig, use_container_width=True)
+                
+            st.subheader("📊 Експорт результатів")
+            csv = df.to_csv(index=False).encode('utf-8')
 
-        # Графік активності
-        st.subheader("📈 Графік інтенсивності доступу")
-        fig = px.histogram(df, x="Time", color="Status", 
-                           color_discrete_map={"✅ OK": "blue", "⚠️ ATTACK": "red"},
-                           nbins=30)
-        st.plotly_chart(fig, use_container_width=True)
+            st.download_button(
+                label="📥 Завантажити повний звіт (CSV)",
+                data=csv,
+                file_name=f"sentinel_report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime='text/csv',
+            )
 
-        # Таблиця логів
-        st.subheader("📝 Журнал подій та аналіз поведінки")
-        st.dataframe(df.sort_values(by='Time', ascending=False), use_container_width=True)
-    else:
-        st.error("Файл логів пустий або не знайдений. Запустіть базу та зробіть запити.")
-        # Після відображення таблиці в Streamlit
-    st.subheader("📊 Експорт результатів")
-    csv = df.to_csv(index=False).encode('utf-8')
+            # ГРАФІК ЧАСОВОЇ АКТИВНОСТІ
+            st.subheader("📈 Хронологія активності")
+            line_fig = px.scatter(df, x="Time", y="query_len", color="Status",
+                                  title="Залежність довжини запиту від часу",
+                                  color_discrete_map={'✅ OK':'#2ecc71', '⚠️ ATTACK':'#e74c3c'})
+            st.plotly_chart(line_fig, use_container_width=True)
 
-    st.download_button(
-        label="📥 Завантажити повний звіт (CSV)",
-        data=csv,
-        file_name=f"sentinel_report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime='text/csv',
-    )
-else:
-    st.info("Натисніть 'Оновити дані' для початку аналізу активності БД.")
+            # ТАБЛИЦЯ
+            st.subheader("📝 Детальний лог аномалій")
+            st.dataframe(df.sort_values(by='Time', ascending=False), use_container_width=True)
 
 
-from sklearn.ensemble import IsolationForest
+        else:
+            st.error("Дані відсутні.")
 
-def calculate_ml_threat(df):
-    if len(df) < 5:  # Мало даних для навчання
-        return df, 0
-    
-    # Готуємо ознаки (features)
-    df['hour'] = df['Time'].dt.hour
-    df['query_len'] = df['Query'].str.len()
-    df['is_select'] = df['Query'].str.upper().str.contains('SELECT').astype(int)
-    
-    # Навчаємо модель "на льоту"
-    model = IsolationForest(contamination=0.1, random_state=42)
-    df['anomaly_score'] = model.fit_predict(df[['hour', 'query_len', 'is_select']])
-    
-    # Рахуємо % аномалій
-    threat_level = int((df['anomaly_score'] == -1).mean() * 100)
-    return df, threat_level
+# --- ВКЛАДКА 2: SQL АУДИТ ---
+with tab_sys:
+    st.header("Опитування активних сесій (pg_stat_activity)")
+    st.info("Цей метод дозволяє бачити запити в пам'яті без доступу до файлів.")
+    if st.button("Зняти дамп активності"):
+        st.warning("Потрібні облікові дані адміністратора БД.")
 
-
-
-
+# --- ВКЛАДКА 3: LIVE ТРАФІК ---
+with tab_live:
+    st.header("Мережевий сніффер")
+    st.write("Перехоплення пакетів на порту 5432.")
+    if st.button("Запустити Live моніторинг"):
+        st.error("Потрібні права Root/Admin та встановлений Npcap/Libpcap.")
